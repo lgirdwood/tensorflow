@@ -26,7 +26,7 @@ namespace tflite {
 #else
 #define TF_LITE_GLOBAL_STD_PREFIX std
 #endif
-
+#if 0
 #define DECLARE_STD_GLOBAL_SWITCH1(tf_name, std_name) \
   template <class T>                                  \
   inline T tf_name(const T x) {                       \
@@ -34,6 +34,12 @@ namespace tflite {
   }
 
 DECLARE_STD_GLOBAL_SWITCH1(TfLiteRound, round);
+#endif
+
+template <class T>
+inline T TfLiteRound(const T x) {
+  return ::round(x);
+}
 
 }  // namespace tflite
 

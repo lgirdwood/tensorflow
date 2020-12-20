@@ -430,6 +430,104 @@ $(addprefix $(PRJDIR)$(2)/esp-idf/,$(1))
 ALL_PROJECT_TARGETS += generate_$(2)_esp_project
 endef
 
+
+# Creates a set of rules to build a SOF component project for an
+# executable, including all of the source and header files required in a
+# separate folder.
+# Arguments are:
+# 1 - Project file template names.
+# 2 - Name of executable.
+# 3 - List of C/C++ source files needed to build the TF Micro component.
+# 4 - List of C/C++ header files needed to build the TF Micro component.
+# 5 - List of C/C++ source files needed to build this particular project.
+# 6 - List of C/C++ header files needed to build this particular project.
+# 7 - Linker flags required.
+# 8 - C++ compilation flags needed.
+# 9 - C compilation flags needed.
+# 10 - List of includes.
+define generate_sof_project
+
+# Copy Licence
+$(PRJDIR)$(2)/sof/LICENSE: LICENSE
+	@mkdir -p $$(dir $$@)
+	@cp $$< $$@
+
+# Project CC files from SOF wrapper
+$(PRJDIR)$(2)/sof/main/%: tensorflow/lite/micro/examples/$(2)/sof/%
+	@echo "main Y for $(2) $$<"
+	@mkdir -p $$(dir $$@)
+	@cp $$< $$@
+
+# Project CC sources files
+$(PRJDIR)$(2)/sof/main/%.cc: tensorflow/lite/micro/examples/$(2)/%.cc
+	@mkdir -p $$(dir $$@)
+	@python tensorflow/lite/micro/tools/make/transform_source.py \
+        --platform=sof \
+        --is_example_source \
+        --source_path="$$<" \
+        < $$< > $$@
+
+# Project header files
+$(PRJDIR)$(2)/sof/main/%.h: tensorflow/lite/micro/examples/$(2)/%.h
+	@mkdir -p $$(dir $$@)
+	@python tensorflow/lite/micro/tools/make/transform_source.py \
+        --platform=sof \
+        --is_example_source \
+        --source_path="$$<" \
+        < $$< > $$@
+
+# No match
+$(PRJDIR)$(2)/sof/main/%: tensorflow/lite/micro/examples/$(2)/%
+	@echo "main X for $(2) $$<"
+	@mkdir -p $$(dir $$@)
+	@cp $$< $$@
+
+# Microlite and thrid party
+$(PRJDIR)$(2)/sof/tfmicro/%: % third_party_downloads
+	@mkdir -p $$(dir $$@)
+	@cp $$< $$@
+
+# Downloads
+$(PRJDIR)$(2)/sof/tfmicro/third_party/%: tensorflow/lite/micro/tools/make/downloads/% third_party_downloads
+	@mkdir -p $$(dir $$@)
+	@cp $$< $$@
+
+$(PRJDIR)$(2)/sof/%: tensorflow/lite/micro/tools/make/templates/sof/%.tpl
+# Split the sources into 2 components:
+# - Main component contains only the example's sources, relative from its dir.
+# - TFL Micro component contains everything but the example sources.
+  $(eval MAIN_SRCS := $(filter tensorflow/lite/micro/examples/%,$(5)))
+  $(eval MAIN_SRCS_RELATIVE := $(patsubst tensorflow/lite/micro/examples/$(2)/%,%,$(MAIN_SRCS)))
+  $(eval TFLM_SRCS := $(filter-out tensorflow/lite/micro/examples/%,$(5)) $(3))
+  $(eval COMPONENT_INCLUDES_RELATIVE := $(addprefix ../tfmicro/,$(10)))
+  $(eval MICRO_LIB_NAME := $(subst lib,,$(subst .a,,$(MICROLITE_LIB_NAME))))
+	@mkdir -p $$(dir $$@)
+	@sed -E 's#\%\{COMPONENT_SRCS\}\%#$(TFLM_SRCS)#g' $$< | \
+	sed -E 's#\%\{MAIN_SRCS\}\%#$(MAIN_SRCS_RELATIVE)#g' | \
+	sed -E 's#\%\{EXECUTABLE\}\%#$(2)#g' | \
+	sed -E 's#\%\{CMAKE_MICROLITE_LIB_NAME\}\%#$(MICRO_LIB_NAME)#g' | \
+	sed -E 's#\%\{CROSS_COMPILE\}\%#$(TARGET_TOOLCHAIN_PREFIX)#g' | \
+	sed -E 's#\%\{MICROLITE_SRCS\}\%#$(3)#g' | \
+	sed -E 's#\%\{MICROLITE_HDRS\}\%#$(4)#g' | \
+	sed -E 's#\%\{PROJECT_SRCS\}\%#$(5)#g' | \
+	sed -E 's#\%\{PROJECT_HDRS\}\%#$(6)#g' | \
+	sed -E 's#\%\{SOF_MAIN_SRCS\}\%#$(SOF_MAIN_SRCS)#g' | \
+	sed -E 's#\%\{COMPONENT_INCLUDES\}\%#$(10)#g' | \
+	sed -E 's#\%\{COMPONENT_REL_INCLUDES\}\%#$(COMPONENT_INCLUDES_RELATIVE)#g' | \
+	sed -E 's#\%\{LINKER_FLAGS\}\%#$(7)#g' | \
+	sed -E 's#\%\{CXX_FLAGS\}\%#$(8)#g' | \
+	sed -E 's#\%\{CC_FLAGS\}\%#$(9)#g' > $$@
+
+generate_$(2)_sof_project: \
+$(addprefix $(PRJDIR)$(2)/sof/,\
+$(patsubst tensorflow/%,tfmicro/tensorflow/%,\
+$(patsubst third_party/%,tfmicro/third_party/%,\
+$(patsubst tensorflow/lite/micro/examples/$(2)/%,main/%,$(3) $(4) $(5) $(6))))) \
+$(addprefix $(PRJDIR)$(2)/sof/,$(1))
+
+ALL_PROJECT_TARGETS += generate_$(2)_sof_project
+endef
+
 # Specialized version of generate_project for TF Lite Micro test targets that
 # automatically includes standard library files, so you just need to pass the
 # test name and any extra source files required.
@@ -449,6 +547,7 @@ ifeq (,$(findstring _benchmark,$(1)))
   $(call generate_arduino_project,$(ARDUINO_PROJECT_FILES) $($(1)_ARDUINO_PROJECT_FILES),$(1),$(MICROLITE_CC_SRCS) $(THIRD_PARTY_CC_SRCS) $(2),$(MICROLITE_CC_HDRS) $(THIRD_PARTY_CC_HDRS) $(MICROLITE_TEST_HDRS) $(3),$(MICROLITE_LIBS),$(CXXFLAGS),$(CCFLAGS))
 endif
 $(call generate_esp_project,$(ESP_PROJECT_FILES) $($(1)_ESP_PROJECT_FILES),$(1),$(MICROLITE_CC_SRCS) $(THIRD_PARTY_CC_SRCS),$(MICROLITE_CC_HDRS) $(THIRD_PARTY_CC_HDRS) $(MICROLITE_TEST_HDRS),$(2),$(3),$(MICROLITE_LIBS),$(CXXFLAGS),$(CCFLAGS),$(PROJECT_INCLUDES))
+$(call generate_sof_project,$(SOF_PROJECT_FILES) $($(1)_SOF_PROJECT_FILES),$(1),$(MICROLITE_CC_SRCS) $(THIRD_PARTY_CC_SRCS),$(MICROLITE_CC_HDRS) $(THIRD_PARTY_CC_HDRS) $(MICROLITE_TEST_HDRS),$(2),$(3),$(MICROLITE_LIBS),$(CXXFLAGS),$(CCFLAGS),$(PROJECT_INCLUDES))
 endef
 
 # Handles the details of generating a binary target, including specializing

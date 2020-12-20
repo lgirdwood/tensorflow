@@ -12,10 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "tensorflow/lite/kernels/internal/reference/quantize.h"
-
-#include <xtensa/tie/xt_hifi2.h>
 
 #include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/kernels/internal/quantization_util.h"
@@ -23,89 +20,20 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/micro/kernels/kernel_util.h"
-#include "tensorflow/lite/micro/kernels/xtensa/fixedpoint_utils.h"
 #include "tensorflow/lite/micro/micro_utils.h"
 
 namespace tflite {
 namespace {
 
 struct OpData {
-  int32_t zero_point = 0;
-  int scale_multiplier = 0;
+  tflite::QuantizationParams quantization_params;
+  // The scaling factor from input to output (aka the 'real multiplier') can
+  // be represented as a fixed point multiplier plus a left shift.
+  int32_t output_multiplier;
+  int output_shift;
 
-  // Use 32-bit multiplier and scale for requantize version of this operator
-  // to preserve compatibility with reference op.
-  int32_t requantize_output_multiplier;
-  int requantize_output_shift;
-  int32_t input_zero_point = 0;
+  int32_t input_zero_point;
 };
-
-void AffineQuantize(int scale_multiplier, const int32_t zero_point,
-                    const RuntimeShape& input_shape, const int16_t* input_data,
-                    const RuntimeShape& output_shape, int8_t* output_data) {
-  const int flat_size = MatchingFlatSize(input_shape, output_shape);
-  ae_q56s min_val_56 = AE_CVTQ48A32S(INT16_MIN);
-  ae_q56s max_val_56 = AE_CVTQ48A32S(INT16_MAX);
-  ae_q56s zero_point_56 = AE_CVTQ48A32S(zero_point);
-
-  const ae_p16x2s* input_data_ptr = (const ae_p16x2s*)(input_data - 2);
-
-  ae_p24x2s scale_multiplier_24x2 = AE_MOVPA24(scale_multiplier);
-
-  int iters = flat_size / 2;
-  for (int i = 0; i < iters; i++) {
-    // Load two 16bit pairs into the 2x24bit register PR:
-    // Values need to be right shifted 8 bits to align from upper 16bits to a
-    // 24bit value:
-    ae_p24x2s inputs_24x2;
-    AE_LP16X2F_IU(inputs_24x2, input_data_ptr, 4);
-    inputs_24x2 = AE_P24X2S_SRAI(inputs_24x2, 8);
-
-    // Q0.23 * Q16.0 == Q16.23
-    {
-      ae_q56s sum_56 = AE_MULP24S_HH(scale_multiplier_24x2, inputs_24x2);
-
-      // Q16.23 -> Q16.0
-      // Shift right only 7 bits (23 - 16). This truncated shift aligns the
-      // 16bit value at the truncation line for 32bit in the QR register. The
-      // lower 16 bits will be used for rounding in AE_ROUNDSQ32SYM.
-      sum_56 = AE_Q56S_SRAI(sum_56, 7);
-
-      // Round and truncate 32 bits
-      sum_56 = AE_ROUNDSQ32SYM(sum_56);
-
-      // Add offset (zero_point_56 is already aligned at 32bits.
-      sum_56 = AE_ADDQ56(sum_56, zero_point_56);
-
-      // Saturate:
-      sum_56 = AE_MINQ56S(sum_56, max_val_56);
-      sum_56 = AE_MAXQ56S(sum_56, min_val_56);
-
-      output_data[i * 2] = static_cast<int16_t>(AE_TRUNCA32Q48(sum_56));
-    }
-    {
-      ae_q56s sum_56 = AE_MULP24S_LL(scale_multiplier_24x2, inputs_24x2);
-
-      // Q16.23 -> Q16.0
-      // Shift right only 7 bits (23 - 16). This truncated shift aligns the
-      // 16bit value at the truncation line for 32bit in the QR register. The
-      // lower 16 bits will be used for rounding in AE_ROUNDSQ32SYM.
-      sum_56 = AE_Q56S_SRAI(sum_56, 23 - 16);
-
-      // Round and truncate 32 bits
-      sum_56 = AE_ROUNDSQ32SYM(sum_56);
-
-      // Add offset (zero_point_56 is already aligned at 32bits.
-      sum_56 = AE_ADDQ56(sum_56, zero_point_56);
-
-      // Saturate:
-      sum_56 = AE_MINQ56S(sum_56, max_val_56);
-      sum_56 = AE_MAXQ56S(sum_56, min_val_56);
-
-      output_data[i * 2 + 1] = static_cast<int16_t>(AE_TRUNCA32Q48(sum_56));
-    }
-  }
-}
 
 void* Init(TfLiteContext* context, const char* buffer, size_t length) {
   TFLITE_DCHECK(context->AllocatePersistentBuffer != nullptr);
@@ -114,52 +42,143 @@ void* Init(TfLiteContext* context, const char* buffer, size_t length) {
 
 TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TFLITE_DCHECK(node->user_data != nullptr);
-  auto* op_data = static_cast<OpData*>(node->user_data);
+  OpData* data = static_cast<OpData*>(node->user_data);
 
-  TfLiteTensor* output = GetOutput(context, node, 0);
+  TF_LITE_ENSURE_EQ(context, NumInputs(node), 1);
+  TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
+
   const TfLiteTensor* input = GetInput(context, node, 0);
+  TF_LITE_ENSURE(context, input != nullptr);
+  TfLiteTensor* output = GetOutput(context, node, 0);
+  TF_LITE_ENSURE(context, output != nullptr);
 
-  // TODO(b/155682734): Fix dangerous input/output scale ratio assumptions.
-  op_data->scale_multiplier =
-      CreateQConstantForInt24(0, input->params.scale / output->params.scale);
+  // TODO(b/128934713): Add support for fixed-point per-channel quantization.
+  // Currently this only support affine per-layer quantization.
+  TF_LITE_ENSURE_EQ(context, output->quantization.type,
+                    kTfLiteAffineQuantization);
+  const auto* affine_quantization =
+      reinterpret_cast<TfLiteAffineQuantization*>(output->quantization.params);
+  TF_LITE_ENSURE(context, affine_quantization);
+  TF_LITE_ENSURE(context, affine_quantization->scale);
+  TF_LITE_ENSURE(context, affine_quantization->scale->size == 1);
 
-  op_data->zero_point = output->params.zero_point;
-  op_data->input_zero_point = input->params.zero_point;
+  TF_LITE_ENSURE(context, input->type == kTfLiteFloat32 ||
+                              input->type == kTfLiteInt16 ||
+                              input->type == kTfLiteInt8);
+  TF_LITE_ENSURE(context, output->type == kTfLiteUInt8 ||
+                              output->type == kTfLiteInt8 ||
+                              output->type == kTfLiteInt16 ||
+                              output->type == kTfLiteInt32);
 
-  double effective_scale = static_cast<double>(input->params.scale) /
-                           static_cast<double>(output->params.scale);
-  QuantizeMultiplier(effective_scale, &op_data->requantize_output_multiplier,
-                     &op_data->requantize_output_shift);
+  if ((input->type == kTfLiteInt16 && output->type == kTfLiteInt8) ||
+      (input->type == kTfLiteInt8 && output->type == kTfLiteInt8) ||
+      (input->type == kTfLiteInt16 && output->type == kTfLiteInt16) ||
+      (input->type == kTfLiteInt16 && output->type == kTfLiteInt32)) {
+    double effective_scale = static_cast<double>(input->params.scale) /
+                             static_cast<double>(output->params.scale);
 
+    QuantizeMultiplier(effective_scale, &data->output_multiplier,
+                       &data->output_shift);
+  }
+
+  data->quantization_params.zero_point = output->params.zero_point;
+  data->quantization_params.scale = static_cast<double>(output->params.scale);
+
+  data->input_zero_point = input->params.zero_point;
   return kTfLiteOk;
 }
 
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   TFLITE_DCHECK(node->user_data != nullptr);
-  auto* op_data = static_cast<OpData*>(node->user_data);
+  OpData* data = static_cast<OpData*>(node->user_data);
 
   const TfLiteEvalTensor* input = tflite::micro::GetEvalInput(context, node, 0);
   TfLiteEvalTensor* output = tflite::micro::GetEvalOutput(context, node, 0);
 
-  if (output->type == kTfLiteInt8 && input->type == kTfLiteInt16) {
-    AffineQuantize(op_data->scale_multiplier, op_data->zero_point,
-                   tflite::micro::GetTensorShape(input),
-                   tflite::micro::GetTensorData<int16_t>(input),
-                   tflite::micro::GetTensorShape(output),
-                   tflite::micro::GetTensorData<int8_t>(output));
-  } else if (output->type == kTfLiteInt32 && input->type == kTfLiteInt16) {
-    int size = ElementCount(*input->dims);
-    reference_ops::Requantize(tflite::micro::GetTensorData<int16_t>(input),
-                              size, op_data->requantize_output_multiplier,
-                              op_data->requantize_output_shift,
-                              op_data->input_zero_point, op_data->zero_point,
-                              tflite::micro::GetTensorData<int32_t>(output));
+  if (input->type == kTfLiteFloat32) {
+    switch (output->type) {
+      case kTfLiteInt8:
+        reference_ops::AffineQuantize(
+            data->quantization_params, tflite::micro::GetTensorShape(input),
+            tflite::micro::GetTensorData<float>(input),
+            tflite::micro::GetTensorShape(output),
+            tflite::micro::GetTensorData<int8_t>(output));
+        break;
+      case kTfLiteUInt8:
+        reference_ops::AffineQuantize(
+            data->quantization_params, tflite::micro::GetTensorShape(input),
+            tflite::micro::GetTensorData<float>(input),
+            tflite::micro::GetTensorShape(output),
+            tflite::micro::GetTensorData<uint8_t>(output));
+        break;
+      case kTfLiteInt16:
+        reference_ops::AffineQuantize(
+            data->quantization_params, tflite::micro::GetTensorShape(input),
+            tflite::micro::GetTensorData<float>(input),
+            tflite::micro::GetTensorShape(output),
+            tflite::micro::GetTensorData<int16_t>(output));
+        return kTfLiteOk;
+      default:
+        TF_LITE_KERNEL_LOG(context, "Input %s, output %s not supported.",
+                           TfLiteTypeGetName(input->type),
+                           TfLiteTypeGetName(output->type));
+        return kTfLiteError;
+    }
+  } else if (input->type == kTfLiteInt16) {
+    size_t size = ElementCount(*input->dims);
+    switch (output->type) {
+      case kTfLiteInt8:
+        reference_ops::Requantize(tflite::micro::GetTensorData<int16_t>(input),
+                                  size, data->output_multiplier,
+                                  data->output_shift, data->input_zero_point,
+                                  data->quantization_params.zero_point,
+                                  tflite::micro::GetTensorData<int8_t>(output));
+        break;
+      case kTfLiteInt16:
+        reference_ops::Requantize(
+            tflite::micro::GetTensorData<int16_t>(input), size,
+            data->output_multiplier, data->output_shift, data->input_zero_point,
+            data->quantization_params.zero_point,
+            tflite::micro::GetTensorData<int16_t>(output));
+        return kTfLiteOk;
+      case kTfLiteInt32:
+        reference_ops::Requantize(
+            tflite::micro::GetTensorData<int16_t>(input), size,
+            data->output_multiplier, data->output_shift, data->input_zero_point,
+            data->quantization_params.zero_point,
+            tflite::micro::GetTensorData<int32_t>(output));
+        return kTfLiteOk;
+      default:
+        TF_LITE_KERNEL_LOG(context, "Input %s, output %s not supported.",
+                           TfLiteTypeGetName(input->type),
+                           TfLiteTypeGetName(output->type));
+        return kTfLiteError;
+    }
+  } else if (input->type == kTfLiteInt8) {
+    // Int8 to Int8 requantization, required if the input and output tensors
+    // have different scales and/or zero points.
+    size_t size = ElementCount(*input->dims);
+    switch (output->type) {
+      case kTfLiteInt8:
+        reference_ops::Requantize(tflite::micro::GetTensorData<int8_t>(input),
+                                  size, data->output_multiplier,
+                                  data->output_shift, data->input_zero_point,
+                                  data->quantization_params.zero_point,
+                                  tflite::micro::GetTensorData<int8_t>(output));
+        break;
+      default:
+        TF_LITE_KERNEL_LOG(context, "Input %s, output %s not supported.",
+                           TfLiteTypeGetName(input->type),
+                           TfLiteTypeGetName(output->type));
+        return kTfLiteError;
+    }
   } else {
     TF_LITE_KERNEL_LOG(context, "Input %s, output %s not supported.",
                        TfLiteTypeGetName(input->type),
                        TfLiteTypeGetName(output->type));
     return kTfLiteError;
   }
+
   return kTfLiteOk;
 }
 

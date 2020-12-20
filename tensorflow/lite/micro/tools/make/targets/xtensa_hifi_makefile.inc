@@ -11,27 +11,11 @@
 ifeq ($(TARGET), xtensa_hifi)
   TARGET_ARCH := hifi3_bd5
 
-  ifndef XTENSA_BASE
-    $(error XTENSA_BASE is undefined)
-  endif
-
-  ifndef XTENSA_TOOLS_VERSION
-    $(error XTENSA_TOOLS_VERSION is undefined)
-  endif
-
-  ifndef XTENSA_CORE
-    $(error XTENSA_CORE is undefined)
-  endif
-
   PLATFORM_ARGS = \
-    -mno-mul16 \
-    -mno-mul32 \
-    -mno-div32 \
     -fsigned-char \
     -fno-exceptions \
     -mlongcalls \
     -INLINE:requested \
-    -mcoproc \
     -fno-zero-initialized-in-bss \
     -mtext-section-literals \
     -fno-unsafe-math-optimizations \
@@ -40,9 +24,9 @@ ifeq ($(TARGET), xtensa_hifi)
     -DTF_LITE_STATIC_MEMORY\
 
   export PATH := $(XTENSA_BASE)/tools/$(XTENSA_TOOLS_VERSION)/XtensaTools/bin:$(PATH)
-  TARGET_TOOLCHAIN_PREFIX := xt-
-  CXX_TOOL := clang++
-  CC_TOOL := clang
+  TARGET_TOOLCHAIN_PREFIX := xtensa-cnl-elf-
+  CXX_TOOL := c++
+  CC_TOOL := cc
 
   CXXFLAGS = -O0 $(PLATFORM_ARGS) -std=c++11 $(TF_LITE_MICRO_FLAGS)
   #TODO: Use -std=c11 ?

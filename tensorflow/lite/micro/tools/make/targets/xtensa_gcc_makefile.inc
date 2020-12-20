@@ -1,30 +1,24 @@
-# Settings for Xtensa toolchain for the hifimini kernels.
-# REQUIRED:
-#  Environment variables:
-#   - XTENSA_BASE  must be set to location of
-#     the Xtensa developer tools installation directory.
-#  Command line arguments:
-#   - XTENSA_TOOLS_VERSION: For example: RI-2019.2-linux
-#   - XTENSA_CORE: The name of the Xtensa core to use
-#      For example: hifimini
+# Settings for GCC Xtensa toolchain for the standard kernels.
 
-TARGET_ARCH :=
+#TARGET_ARCH :=
 
 PLATFORM_FLAGS = \
   -DTF_LITE_MCU_DEBUG_LOG \
   -DTF_LITE_USE_CTIME \
   -DXTENSA \
-  -DMAX_RFFT_PWR=9 \
-  -DMIN_RFFT_PWR=MAX_RFFT_PWR
+  -DNDEBUG \
+  -DTF_LITE_STRIP_ERROR_STRINGS
 
+#  -DMAX_RFFT_PWR=9
+# -DMIN_RFFT_PWR=MAX_RFFT_PWR
 
-#export PATH := $(XTENSA_BASE)/tools/$(XTENSA_TOOLS_VERSION)/XtensaTools/bin:$(PATH)
-TARGET_TOOLCHAIN_PREFIX := xtensa-cnl-elf-
+TARGET_TOOLCHAIN_PREFIX := $(TARGET_ARCH)-elf-
 CXX_TOOL := c++
 CC_TOOL := cc
 
-CXXFLAGS += $(PLATFORM_FLAGS)
-CCFLAGS += $(PLATFORM_FLAGS)
+CXXFLAGS = -O2 $(PLATFORM_ARGS) -std=c++11 $(TF_LITE_MICRO_FLAGS)
+#TODO: Use -std=c11 ?
+CCFLAGS = -O2 $(PLATFORM_ARGS) $(TF_LITE_MICRO_FLAGS)
 
 # TODO(b/150240249): Do not remove -fno-rtti once that works for the Xtensa toolchain.
 CXXFLAGS := $(filter-out -fno-rtti, $(CXXFLAGS))
@@ -40,4 +34,3 @@ EXCLUDED_EXAMPLE_TESTS := \
   tensorflow/lite/micro/examples/person_detection/Makefile.inc \
   tensorflow/lite/micro/examples/person_detection_experimental/Makefile.inc
 MICRO_LITE_EXAMPLE_TESTS := $(filter-out $(EXCLUDED_EXAMPLE_TESTS), $(MICRO_LITE_EXAMPLE_TESTS))
-

@@ -164,6 +164,8 @@ def main(unused_args, flags):
     output_text = transform_arduino_sources(input_file_lines, flags)
   elif flags.platform == 'esp':
     output_text = transform_esp_sources(input_file_lines, flags)
+  elif flags.platform == 'sof':
+    output_text = transform_esp_sources(input_file_lines, flags)
 
   sys.stdout.write(output_text)
 
@@ -173,7 +175,7 @@ def parse_args():
   parser = argparse.ArgumentParser()
   parser.add_argument(
       '--platform',
-      choices=['arduino', 'esp'],
+      choices=['arduino', 'esp', 'sof'],
       required=True,
       help='Target platform.')
   parser.add_argument(

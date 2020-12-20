@@ -101,7 +101,7 @@ TfLiteStatus Softmax(OpData op_data, const RuntimeShape& input_shape,
   }
   return kTfLiteOk;
 }
-
+#if 0
 TfLiteStatus CalculateSoftmaxOpData(TfLiteContext* context,
                                     const TfLiteTensor* input,
                                     TfLiteTensor* output,
@@ -136,12 +136,57 @@ TfLiteStatus CalculateSoftmaxOpData(TfLiteContext* context,
           std::exp((-scaled_input) * static_cast<float>(params->beta));
 
       float exponent_scaled =
-          std::round(exp_value * static_cast<float>(1 << kExpFractionalBits));
+          ::round(exp_value * static_cast<float>(1 << kExpFractionalBits));
       op_data->exp_lut[i] = static_cast<uint16_t>(exponent_scaled);
     }
   }
   return kTfLiteOk;
 }
+#else
+
+//TODO: Q format
+static uint16_t exp16_lut[256] = {0};
+
+TfLiteStatus CalculateSoftmaxOpData(TfLiteContext* context,
+                                    const TfLiteTensor* input,
+                                    TfLiteTensor* output,
+                                    const TfLiteSoftmaxParams* params,
+                                    OpData* op_data) {
+  if (input->type == kTfLiteUInt8 || input->type == kTfLiteInt8) {
+    if (input->type == kTfLiteUInt8) {
+      TF_LITE_ENSURE_EQ(context, output->params.zero_point, 0);
+    } else {
+      if (output->type == kTfLiteInt16) {
+        TF_LITE_ENSURE_EQ(context, output->params.zero_point,
+                          std::numeric_limits<int16_t>::min());
+        // NOTE: Current int16_t softmax output does not require symmetric
+        // scaling
+        // - so no need to verify scale here.
+      } else {
+        TF_LITE_ENSURE_EQ(context, output->params.zero_point,
+                          std::numeric_limits<int8_t>::min());
+        TF_LITE_ENSURE(context, output->params.scale == 1.f / 256);
+      }
+    }
+
+    // Precompute e^(-x * input_scale * beta) for every possible int8_t input.
+    // This computation is used for every iteration of Softmax.  We must compute
+    // using pre-scaled inputs to avoid introducing additional error, while
+    // restricting our input range to the int8_t range. This is valid since beta
+    // and input scale are constant for a given op in the graph. Skip index 0
+    // since that is a special case which requires 1 integer bit instead of 0.
+    for (int i = 1; i <= kInt8Range; i++) {
+      uint16_t scaled_input = i * input->params.scale; // TODO scale to Q
+      uint16_t exp_value =
+          exp16_lut[i] * (-scaled_input) * params->beta); //TODO scale to Q
+
+      uint16_t exponent_scaled = exp_value * (1 << 16);
+      op_data->exp_lut[i] = exponent_scaled;
+    }
+  }
+  return kTfLiteOk;
+}
+#endif
 
 void* SoftmaxInit(TfLiteContext* context, const char* buffer, size_t length) {
   TFLITE_DCHECK(context->AllocatePersistentBuffer != nullptr);

@@ -378,6 +378,12 @@ ESP_PROJECT_FILES := \
   main/CMakeLists.txt \
   components/tfmicro/CMakeLists.txt
 
+SOF_PROJECT_FILES := \
+  README_SOF.md \
+  CMakeLists.txt \
+  main/CMakeLists.txt \
+  tfmicro/CMakeLists.txt
+
 ALL_PROJECT_TARGETS :=
 
 ARDUINO_LIBRARY_TARGETS :=
